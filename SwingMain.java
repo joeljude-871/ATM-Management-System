@@ -252,20 +252,28 @@ public class SwingMain extends JFrame {
     private void showDashboard() {
         JPanel panel = page("Welcome, " + currentAccount.customerName(),
                 "Card ending in " + maskCard(currentAccount.cardNumber()) + "  •  Choose an operation");
-        JPanel grid = new JPanel(new GridLayout(2, 3, 16, 16));
+        JPanel grid = new JPanel(new GridLayout(3, 3, 16, 16));
         grid.setOpaque(false);
         JButton balance = button("Check Balance", NAVY);
         JButton deposit = button("Deposit Money", new Color(24,121,78));
         JButton withdraw = button("Withdraw Money", new Color(183,121,31));
         JButton history = button("Mini Statement", NAVY);
         JButton changePin = button("Change PIN", new Color(15,118,110));
-        JButton logout = button("Logout", new Color(180, 35, 24));
+        JButton cardStatus = button("Card Status", new Color(80, 90, 110));
+        JButton blockCard = button("Block My Card", new Color(180, 35, 24));
+        JButton cardHistory = button("Card Activity History", new Color(90, 70, 130));
+        JButton unblockCard = button("Unblock My Card", new Color(19, 125, 90));
+        JButton logout = button("Logout", new Color(90, 100, 110));
 
         balance.addActionListener(e -> showBalance());
         deposit.addActionListener(e -> handleMoneyOperation(true));
         withdraw.addActionListener(e -> handleMoneyOperation(false));
         history.addActionListener(e -> showHistory());
         changePin.addActionListener(e -> showChangePin());
+        cardStatus.addActionListener(e -> showCardStatus());
+        blockCard.addActionListener(e -> handleBlockCard());
+        cardHistory.addActionListener(e -> showCardHistory());
+        unblockCard.addActionListener(e -> handleUnblockCard());
         logout.addActionListener(e -> {
             currentAccount = null;
             showLogin();
@@ -276,6 +284,10 @@ public class SwingMain extends JFrame {
         grid.add(withdraw);
         grid.add(history);
         grid.add(changePin);
+        grid.add(cardStatus);
+        grid.add(blockCard);
+        grid.add(cardHistory);
+        grid.add(unblockCard);
         grid.add(logout);
 
         JPanel center = new JPanel(new GridBagLayout());
@@ -287,6 +299,93 @@ public class SwingMain extends JFrame {
         footer.setForeground(new Color(100, 110, 120));
         panel.add(footer, BorderLayout.SOUTH);
         setPage(panel);
+    }
+
+    private void showCardStatus() {
+        try {
+            String status = service.getCardStatus(currentAccount.id());
+            message("Current card status: " + status, status.equals("ACTIVE")
+                    ? JOptionPane.INFORMATION_MESSAGE : JOptionPane.WARNING_MESSAGE);
+        } catch (SQLException ex) {
+            databaseError(ex);
+        }
+    }
+
+    private void handleBlockCard() {
+        try {
+            if ("BLOCKED".equals(service.getCardStatus(currentAccount.id()))) {
+                message("This card is already blocked.", JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+            JPanel form = new JPanel(new GridLayout(2, 2, 10, 10));
+            JPasswordField pin = passwordField();
+            JTextField reason = textField();
+            form.add(new JLabel("Verify ATM PIN:"));
+            form.add(pin);
+            form.add(new JLabel("Reason for blocking:"));
+            form.add(reason);
+            int result = JOptionPane.showConfirmDialog(this, form, "Block ATM Card",
+                    JOptionPane.OK_CANCEL_OPTION, JOptionPane.WARNING_MESSAGE);
+            if (result != JOptionPane.OK_OPTION) return;
+            service.blockCard(currentAccount.id(), new String(pin.getPassword()), reason.getText());
+            message("Your card is now BLOCKED. Card transactions are disabled.", JOptionPane.INFORMATION_MESSAGE);
+            showDashboard();
+        } catch (IllegalArgumentException ex) {
+            message(ex.getMessage(), JOptionPane.WARNING_MESSAGE);
+        } catch (SQLException ex) {
+            databaseError(ex);
+        }
+    }
+
+    private void handleUnblockCard() {
+        try {
+            if ("ACTIVE".equals(service.getCardStatus(currentAccount.id()))) {
+                message("Your card is already active.", JOptionPane.INFORMATION_MESSAGE);
+                return;
+            }
+            JPasswordField pin = passwordField();
+            int result = JOptionPane.showConfirmDialog(this, new Object[] {
+                    new JLabel("Verify your ATM PIN to request unblocking:"), pin
+            }, "Verify and Unblock Card", JOptionPane.OK_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE);
+            if (result != JOptionPane.OK_OPTION) return;
+            int confirm = JOptionPane.showConfirmDialog(this,
+                    "After PIN verification, your card will be returned to ACTIVE status. Continue?",
+                    "Confirm Unblocking", JOptionPane.YES_NO_OPTION);
+            if (confirm != JOptionPane.YES_OPTION) return;
+            service.unblockCard(currentAccount.id(), new String(pin.getPassword()));
+            message("PIN verified. Your card is now ACTIVE.", JOptionPane.INFORMATION_MESSAGE);
+            showDashboard();
+        } catch (IllegalArgumentException ex) {
+            message(ex.getMessage(), JOptionPane.WARNING_MESSAGE);
+        } catch (SQLException ex) {
+            databaseError(ex);
+        }
+    }
+
+    private void showCardHistory() {
+        try {
+            List<AtmService.CardAction> actions = service.getCardHistory(currentAccount.id());
+            String[] columns = {"Date and time", "Action", "Reason"};
+            DefaultTableModel model = new DefaultTableModel(columns, 0) {
+                @Override public boolean isCellEditable(int row, int column) { return false; }
+            };
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+            for (AtmService.CardAction action : actions) {
+                model.addRow(new Object[] {
+                        action.createdAt().toLocalDateTime().format(formatter),
+                        action.action(), action.reason()
+                });
+            }
+            JTable table = new JTable(model);
+            table.setRowHeight(26);
+            table.setFillsViewportHeight(true);
+            JScrollPane scroll = new JScrollPane(table);
+            scroll.setPreferredSize(new Dimension(680, 300));
+            JOptionPane.showMessageDialog(this, scroll, "Card Blocking/Unblocking History",
+                    JOptionPane.INFORMATION_MESSAGE);
+        } catch (SQLException ex) {
+            databaseError(ex);
+        }
     }
 
     private void showBalance() {

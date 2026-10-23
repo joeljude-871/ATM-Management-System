@@ -9,6 +9,88 @@ import java.util.List;
 public class AtmService {
     public record Account(long id, String cardNumber, String customerName, BigDecimal balance) {}
     public record Txn(String type, BigDecimal amount, BigDecimal balanceAfter, Timestamp createdAt) {}
+    public record CardAction(String action, String reason, Timestamp createdAt) {}
+
+    public String getCardStatus(long accountId) throws SQLException {
+        try (Connection con = Database.getConnection();
+             PreparedStatement ps = con.prepareStatement("SELECT card_status FROM accounts WHERE account_id=?")) {
+            ps.setLong(1, accountId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) throw new SQLException("Account not found.");
+                return rs.getString("card_status");
+            }
+        }
+    }
+
+    public void blockCard(long accountId, String pin, String reason) throws SQLException {
+        if (reason == null || reason.isBlank())
+            throw new IllegalArgumentException("Please provide a reason for blocking the card.");
+        changeCardStatus(accountId, pin, "BLOCKED", reason.trim());
+    }
+
+    public void unblockCard(long accountId, String pin) throws SQLException {
+        changeCardStatus(accountId, pin, "ACTIVE", "Customer requested unblocking; PIN verified");
+    }
+
+    public List<CardAction> getCardHistory(long accountId) throws SQLException {
+        List<CardAction> actions = new ArrayList<>();
+        String sql = "SELECT action, reason, created_at FROM card_status_history WHERE account_id=? ORDER BY created_at DESC";
+        try (Connection con = Database.getConnection();
+             PreparedStatement ps = con.prepareStatement(sql)) {
+            ps.setLong(1, accountId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) actions.add(new CardAction(
+                        rs.getString("action"), rs.getString("reason"), rs.getTimestamp("created_at")));
+            }
+        }
+        return actions;
+    }
+
+    private void changeCardStatus(long accountId, String pin, String targetStatus, String reason) throws SQLException {
+        try (Connection con = Database.getConnection()) {
+            con.setAutoCommit(false);
+            try {
+                String storedPin;
+                String currentStatus;
+                try (PreparedStatement ps = con.prepareStatement(
+                        "SELECT pin_hash, card_status FROM accounts WHERE account_id=? FOR UPDATE")) {
+                    ps.setLong(1, accountId);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (!rs.next()) throw new SQLException("Account not found.");
+                        storedPin = rs.getString("pin_hash");
+                        currentStatus = rs.getString("card_status");
+                    }
+                }
+                if (!PinUtil.verify(pin, storedPin))
+                    throw new IllegalArgumentException("PIN verification failed.");
+                if (currentStatus.equals(targetStatus)) {
+                    throw new IllegalArgumentException(targetStatus.equals("BLOCKED")
+                            ? "This card is already blocked." : "This card is already active.");
+                }
+                try (PreparedStatement ps = con.prepareStatement(
+                        "UPDATE accounts SET card_status=? WHERE account_id=?")) {
+                    ps.setString(1, targetStatus);
+                    ps.setLong(2, accountId);
+                    ps.executeUpdate();
+                }
+                try (PreparedStatement ps = con.prepareStatement(
+                        "INSERT INTO card_status_history(account_id, action, reason) VALUES(?,?,?)")) {
+                    ps.setLong(1, accountId);
+                    ps.setString(2, targetStatus.equals("BLOCKED") ? "BLOCK" : "UNBLOCK");
+                    ps.setString(3, reason);
+                    ps.executeUpdate();
+                }
+                con.commit();
+            } catch (Exception e) {
+                con.rollback();
+                if (e instanceof SQLException se) throw se;
+                if (e instanceof RuntimeException re) throw re;
+                throw new SQLException(e);
+            } finally {
+                con.setAutoCommit(true);
+            }
+        }
+    }
 
     public boolean createAccount(String card, String name, String pin, BigDecimal openingBalance) throws SQLException {
         if (card == null || !card.matches("\\d{8,20}"))
@@ -51,7 +133,9 @@ public class AtmService {
             ps.setLong(1, accountId);
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) throw new SQLException("Account not found.");
-                return rs.getBigDecimal(1);
+                if (!"ACTIVE".equals(rs.getString("card_status")))
+                    throw new IllegalArgumentException("This card is blocked. Unblock it before making transactions.");
+                return rs.getBigDecimal("balance");
             }
         }
     }
@@ -158,11 +242,13 @@ public class AtmService {
     }
 
     private BigDecimal lockBalance(Connection con, long accountId) throws SQLException {
-        try (PreparedStatement ps = con.prepareStatement("SELECT balance FROM accounts WHERE account_id=? FOR UPDATE")) {
+        try (PreparedStatement ps = con.prepareStatement("SELECT balance, card_status FROM accounts WHERE account_id=? FOR UPDATE")) {
             ps.setLong(1, accountId);
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) throw new SQLException("Account not found.");
-                return rs.getBigDecimal(1);
+                if (!"ACTIVE".equals(rs.getString("card_status")))
+                    throw new IllegalArgumentException("This card is blocked. Unblock it before making transactions.");
+                return rs.getBigDecimal("balance");
             }
         }
     }
